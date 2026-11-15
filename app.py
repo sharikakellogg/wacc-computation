@@ -46,11 +46,13 @@ OECD_PAGE_URL = (
     "https://www.oecd.org/en/publications/corporate-tax-statistics-2024_9c27d6e8-en/full-report/"
     "statutory-corporate-income-tax-rates_440f9286.html"
 )
+# OECD's current SDMX dataflow for statutory corporate income tax rates.
+# Select combined statutory rates for general government (S13), not central/local
+# government sub-sectors. The parser then keeps each country's latest year.
 OECD_API_URLS = [
-    ("https://sdmx.oecd.org/archive/rest/data/OECD,DF_CTS_CIT/.COMB_CIT_RATE",
-     {"lastNObservations": "1"}, "application/vnd.sdmx.data+csv; charset=utf-8"),
-    ("https://sdmx.oecd.org/archive/rest/data/OECD,DF_CTS_CIT/.COMB_CIT_RATE",
-     {"lastNObservations": "1", "format": "csvfilewithlabels"}, "*/*"),
+    ("https://sdmx.oecd.org/public/rest/data/OECD.CTP.TPS,DSD_TAX_CIT@DF_CIT,1.0/"
+     ".A.CIT_C.ST..S13..?startPeriod=2000&dimensionAtObservation=AllDimensions&format=csvfilewithlabels",
+     None, "text/csv"),
 ]
 TE_BONDS_URL = "https://tradingeconomics.com/bonds"
 TE_COUNTRY_URL = "https://tradingeconomics.com/{slug}/government-bond-yield"
@@ -316,21 +318,40 @@ def parse_bbb_spread(text: str) -> tuple[float, str, str]:
 
 
 def parse_oecd_csv(text: str) -> tuple[dict, str]:
-    """Return ({ISO3: rate as decimal}, latest year) from an SDMX-CSV response."""
+    """Return {ISO3: statutory rate as decimal} and the latest year from OECD SDMX CSV."""
     df = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+    # OECD's csvfilewithlabels headers can include descriptions after a colon.
     df.columns = [re.split(r"\s*:\s*", str(c).strip(), maxsplit=1)[0].upper() for c in df.columns]
     ctry = next((c for c in ("REF_AREA", "COUNTRY", "COU", "LOCATION", "JURISDICTION") if c in df.columns), None)
     if not ctry or "TIME_PERIOD" not in df.columns or "OBS_VALUE" not in df.columns:
-        raise SourceError(f"unexpected OECD columns: {', '.join(df.columns[:8])}")
+        raise SourceError(f"unexpected OECD columns: {', '.join(df.columns[:12])}")
+
     df["val"] = df["OBS_VALUE"].map(to_number)
     df["year"] = pd.to_numeric(df["TIME_PERIOD"].str.extract(r"(\d{4})")[0], errors="coerce")
-    df = df.dropna(subset=["val", "year"])
+    df["iso3"] = df[ctry].astype(str).str.strip().map(
+        lambda x: x.upper() if x.upper() in COUNTRY_BY_ISO else
+        NAME_TO_ISO.get(x.lower().replace("*", ""), None)
+    )
+    df = df.dropna(subset=["val", "year", "iso3"])
     if df.empty:
-        raise SourceError("OECD response held no numeric observations")
-    df = df.sort_values("year").drop_duplicates(ctry, keep="last")
+        raise SourceError("OECD response held no numeric country observations")
+
+    # The API query requests S13 (general government). If OECD adds extra rows or
+    # dimensions in a future response, prefer the explicit general-government row.
+    sector_col = next((c for c in df.columns if c in {"INSTITUTIONAL_SECTOR", "SECTOR"}), None)
+    if sector_col:
+        sector = df[sector_col].astype(str).str.upper()
+        if sector.eq("S13").any():
+            df = df[sector.eq("S13")]
+
+    # Keep the latest observation separately for each country.
+    df = df.sort_values(["iso3", "year"]).drop_duplicates("iso3", keep="last")
     scale = 100.0 if df["val"].max() > 1.0 else 1.0
-    rates = {str(k).strip().upper(): float(v) / scale for k, v in zip(df[ctry], df["val"])}
-    return rates, str(int(df["year"].max()))
+    rates = {str(k): float(v) / scale for k, v in zip(df["iso3"], df["val"])}
+    latest_year = int(df["year"].max())
+    if not rates:
+        raise SourceError("OECD response did not contain usable statutory tax rates")
+    return rates, str(latest_year)
 
 
 def parse_oecd_page(text: str) -> tuple[dict, str]:
@@ -418,7 +439,7 @@ def fetch_tax_rates() -> dict:
         try:
             rates, year = parse_oecd_csv(http_get(url, params, accept).text)
             return {"rates": rates, "year": year, "url": OECD_PAGE_URL, "retrieved": now_utc(),
-                    "via": "OECD Corporate Tax Statistics database (SDMX)"}
+                    "via": "OECD Corporate Tax Statistics database (SDMX, statutory general-government rate)"}
         except (SourceError, ValueError, pd.errors.ParserError) as exc:
             errors.append(str(exc))
     try:

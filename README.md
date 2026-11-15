@@ -49,9 +49,10 @@ displayed figures can differ by 0.01.
 Notes and assumptions:
 
 - The beta used is "Unlevered beta", not "Unlevered beta corrected for cash".
-- The OECD report page may present rates as a chart rather than a table. The app therefore queries the OECD data service
-  that backs the Corporate Tax Statistics publication, and falls back to the page. The latest year available is shown
-  in the sources table.
+- The app queries the OECD Corporate Income Tax dataset through its current SDMX endpoint, selecting the combined
+  statutory corporate income tax rate for general government (S13). It keeps the latest observation for each country
+  and falls back to the report page if the data service is unavailable. The latest year available is shown in the
+  sources table.
 - Trading Economics publishes dates without a year in its table (for example "Nov/13"). The app shows the date as
   published.
 - Websites change and may block automated requests. If a source fails, the app says which one, and you can enter the
